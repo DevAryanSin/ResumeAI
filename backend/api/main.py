@@ -4,43 +4,22 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import os
 import logging
-from typing import Optional
+import requests
+from typing import Optional, List
+from dotenv import load_dotenv
 
-# --- Import your initialized Vertex AI clients ---
-from vertex import (
-    credentials,  # Import the credentials object
-    generative_model,
-    embedding_model,
-    vector_search_endpoint,
-    PROJECT_ID,
-    LOCATION
-)
-
-# --- Initialize non-Vertex AI services here ---
-from google.cloud import storage
-from sentence_transformers.cross_encoder import CrossEncoder
+# Load environment variables
+load_dotenv()
 
 logger = logging.getLogger("uvicorn")
 
-# Init GCS Client using the same credentials
-try:
-    storage_client = storage.Client(project=PROJECT_ID, credentials=credentials)
-    logger.info("Google Cloud Storage client initialized.")
-except Exception as e:
-    logger.error(f"Failed to initialize GCS client: {e}")
-    storage_client = None # App can run but GCS features will fail
-
-# Init Cross-Encoder (this is local, no creds needed)
-try:
-    cross_encoder = CrossEncoder('cross-encoder/ms-marco-minilm-l-6-v2')
-    logger.info("Cross-encoder model loaded.")
-except Exception as e:
-    logger.error(f"Failed to load cross-encoder: {e}")
-    cross_encoder = None # App can run but reranking will fail
-
+# --- Configuration ---
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    logger.warning("GEMINI_API_KEY not set. Please set it in .env file.")
 
 # --- FastAPI App Setup ---
-app = FastAPI(title="RezumAI-backend", version="0.1")
+app = FastAPI(title="RezumAI-backend", version="0.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -53,51 +32,107 @@ app.add_middleware(
 # --- Pydantic Models ---
 class ChatRequest(BaseModel):
     message: str
-    conversation_id: Optional[str] = None
+    conversation_history: Optional[List[dict]] = None
 
 class ChatResponse(BaseModel):
     reply: str
     source: str
 
+# --- Helper Functions ---
+def call_gemini_api(message: str, conversation_history: Optional[List[dict]] = None) -> str:
+    """
+    Calls Gemini API directly using REST endpoint.
+    """
+    if not GEMINI_API_KEY:
+        raise Exception("GEMINI_API_KEY is not configured")
+    
+    # Build conversation contents
+    contents = []
+    
+    # Add conversation history if provided
+    if conversation_history:
+        for msg in conversation_history:
+            contents.append({
+                "role": msg.get("role", "user"),
+                "parts": [{"text": msg.get("text", "")}]
+            })
+    
+    # Add current message
+    contents.append({
+        "role": "user",
+        "parts": [{"text": message}]
+    })
+    
+    # Gemini API endpoint
+    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    
+    request_payload = {
+        "contents": contents,
+        "generationConfig": {
+            "temperature": 0.7,
+            "topK": 40,
+            "topP": 0.95,
+            "maxOutputTokens": 2048,
+        }
+    }
+    
+    try:
+        logger.info(f"Calling Gemini API with message: {message[:100]}...")
+        response = requests.post(
+            api_url,
+            json=request_payload,
+            headers={"Content-Type": "application/json"},
+            timeout=30
+        )
+        
+        if response.status_code != 200:
+            logger.error(f"Gemini API error: {response.status_code} - {response.text}")
+            raise Exception(f"Gemini API returned status {response.status_code}: {response.text}")
+        
+        response_json = response.json()
+        
+        # Extract text from response
+        if "candidates" in response_json and len(response_json["candidates"]) > 0:
+            candidate = response_json["candidates"][0]
+            if "content" in candidate and "parts" in candidate["content"]:
+                parts = candidate["content"]["parts"]
+                if len(parts) > 0 and "text" in parts[0]:
+                    return parts[0]["text"]
+        
+        raise Exception("Unexpected response format from Gemini API")
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Request to Gemini API failed: {e}")
+        raise Exception(f"Failed to connect to Gemini API: {e}")
+
 # --- Endpoints ---
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
-
+    """Health check endpoint"""
+    return {
+        "status": "ok",
+        "gemini_configured": GEMINI_API_KEY is not None
+    }
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
+    """
+    Chat endpoint that uses Gemini API.
+    Accepts a message and optional conversation history.
+    """
     if not req.message:
         raise HTTPException(status_code=400, detail="message is required")
+    
+    if not GEMINI_API_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="Gemini API key not configured. Please set GEMINI_API_KEY in .env file"
+        )
 
     try:
-        # Now you can use the imported clients directly
-        # Example:
-        # 1. Get embeddings:
-        #    query_embedding = embedding_model.get_embeddings([req.message])[0].values
-        #
-        # 2. Search vector store:
-        #    if vector_search_endpoint:
-        #        search_results = vector_search_endpoint.find_neighbors(...)
-        #
-        # 3. Retrieve from GCS:
-        #    if storage_client:
-        #        blob = storage_client.bucket(WIKI_BUCKET_NAME).blob(...)
-        #
-        # 4. Rerank:
-        #    if cross_encoder:
-        #        scores = cross_encoder.predict(...)
-        #
-        # 5. Call Gemini
-        response = generative_model.generate_content(
-            req.message,
-        )
-        
-        reply = response.text
+        reply = call_gemini_api(req.message, req.conversation_history)
         return ChatResponse(reply=reply, source="gemini-1.5-flash")
 
     except Exception as e:
         logger.error(f"Chat endpoint failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error processing chat: {e}")
-
-# (Your Agora token endpoint can be added back here if needed)
+        raise HTTPException(status_code=500, detail=f"Error processing chat: {str(e)}")

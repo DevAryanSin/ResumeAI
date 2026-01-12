@@ -1,28 +1,99 @@
-# RezumAI Backend (FastAPI)
+# RezumAI Backend
 
-This backend is a minimal FastAPI app with placeholder integrations for:
+FastAPI backend server with direct Gemini API integration.
 
-- Vertex AI (Text generation) via `google-cloud-aiplatform` (optional)
-- Agora conversational / token endpoint (placeholder)
+## Features
 
-Files:
-- `main.py` - FastAPI app with `/chat` and `/agora/token` endpoints.
-- `.env.example` - example environment variables.
-- `requirements.txt` - Python dependencies for development.
+- Direct REST API calls to Gemini 1.5 Flash
+- No Google Cloud SDK dependencies
+- Simple API key authentication
+- Conversation history support
+- CORS enabled for frontend integration
 
-Quick start (local, Python):
-1. Create a virtualenv and install deps:
+## Setup
 
-   python -m venv .venv
-   .\.venv\Scripts\Activate.ps1; pip install -r requirements.txt
+1. Create a virtual environment:
+```powershell
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+```
 
-2. Copy `.env.example` to `.env` and fill in credentials for Vertex/Agora.
+2. Install dependencies:
+```powershell
+pip install -r requirements.txt
+```
 
-3. Run the app:
+3. Configure environment:
+```powershell
+Copy-Item .env.example .env
+# Edit .env and add your GEMINI_API_KEY
+```
 
-   .\.venv\Scripts\Activate.ps1; uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+4. Run the server:
+```powershell
+uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
+```
 
-Notes:
-- The Vertex AI call in `main.py` is a conservative, best-effort example. Adjust the request/response handling to match the exact model you use and the SDK version.
-- For Agora tokens, replace the placeholder `generate_agora_token` with the official token builder from Agora.
-- When running in Docker, pass environment variables via an env-file or secrets mechanism.
+## API Endpoints
+
+### GET /health
+Health check endpoint.
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "gemini_configured": true
+}
+```
+
+### POST /chat
+Send a message to Gemini.
+
+**Request:**
+```json
+{
+  "message": "Hello, how are you?",
+  "conversation_history": [
+    {"role": "user", "text": "Previous message"},
+    {"role": "model", "text": "Previous response"}
+  ]
+}
+```
+
+**Response:**
+```json
+{
+  "reply": "I'm doing well, thank you for asking!",
+  "source": "gemini-1.5-flash"
+}
+```
+
+## Configuration
+
+Edit `.env` file:
+
+```env
+GEMINI_API_KEY=your_api_key_here
+HOST=0.0.0.0
+PORT=8000
+```
+
+## Dependencies
+
+- **fastapi**: Web framework
+- **uvicorn**: ASGI server
+- **python-dotenv**: Environment variable management
+- **requests**: HTTP client for Gemini API
+- **pydantic**: Data validation
+
+## Development
+
+Run with auto-reload:
+```powershell
+uvicorn api.main:app --reload
+```
+
+View API docs:
+- Swagger UI: `http://localhost:8000/docs`
+- ReDoc: `http://localhost:8000/redoc`
