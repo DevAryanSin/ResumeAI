@@ -9,6 +9,8 @@ import fitz  # PyMuPDF
 from typing import Optional, List
 from dotenv import load_dotenv
 import io
+import time
+from datetime import datetime, timedelta
 
 # Load environment variables
 load_dotenv()
@@ -68,7 +70,7 @@ def extract_text_from_pdf_bytes(pdf_bytes: bytes, filename: str) -> str:
 
 def call_gemini_api(message: str, conversation_history: Optional[List[dict]] = None, pdf_context: Optional[str] = None) -> str:
     """
-    Calls Gemini API directly using REST endpoint.
+    Calls Gemini API directly using REST endpoint with retry logic and exponential backoff.
     Includes PDF context if provided.
     """
     if not GEMINI_API_KEY:
@@ -121,34 +123,67 @@ Based on the above PDF content, please answer my question:
         }
     }
     
-    try:
-        logger.info(f"Calling Gemini API with message: {message[:100]}... (PDF context: {len(pdf_context) if pdf_context else 0} chars)")
-        response = requests.post(
-            api_url,
-            json=request_payload,
-            headers={"Content-Type": "application/json"},
-            timeout=60  # Increased timeout for larger contexts
-        )
-        
-        if response.status_code != 200:
-            logger.error(f"Gemini API error: {response.status_code} - {response.text}")
-            raise Exception(f"Gemini API returned status {response.status_code}: {response.text}")
-        
-        response_json = response.json()
-        
-        # Extract text from response
-        if "candidates" in response_json and len(response_json["candidates"]) > 0:
-            candidate = response_json["candidates"][0]
-            if "content" in candidate and "parts" in candidate["content"]:
-                parts = candidate["content"]["parts"]
-                if len(parts) > 0 and "text" in parts[0]:
-                    return parts[0]["text"]
-        
-        raise Exception("Unexpected response format from Gemini API")
-        
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Request to Gemini API failed: {e}")
-        raise Exception(f"Failed to connect to Gemini API: {e}")
+    # Retry configuration
+    max_retries = 3
+    base_delay = 2  # seconds
+    
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"Calling Gemini API (attempt {attempt + 1}/{max_retries}) with message: {message[:100]}... (PDF context: {len(pdf_context) if pdf_context else 0} chars)")
+            
+            response = requests.post(
+                api_url,
+                json=request_payload,
+                headers={"Content-Type": "application/json"},
+                timeout=60  # Increased timeout for larger contexts
+            )
+            
+            # Handle rate limiting (429)
+            if response.status_code == 429:
+                if attempt < max_retries - 1:
+                    # Calculate exponential backoff delay
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(f"Rate limit hit (429). Retrying in {delay} seconds... (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(delay)
+                    continue
+                else:
+                    # Final attempt failed
+                    logger.error(f"Rate limit exceeded after {max_retries} attempts")
+                    raise Exception(
+                        "Gemini API rate limit exceeded. Please try again in a few moments. "
+                        "If this persists, you may have reached your daily quota. "
+                        "Check your quota at: https://aistudio.google.com/app/apikey"
+                    )
+            
+            # Handle other errors
+            if response.status_code != 200:
+                logger.error(f"Gemini API error: {response.status_code} - {response.text}")
+                raise Exception(f"Gemini API returned status {response.status_code}: {response.text}")
+            
+            response_json = response.json()
+            
+            # Extract text from response
+            if "candidates" in response_json and len(response_json["candidates"]) > 0:
+                candidate = response_json["candidates"][0]
+                if "content" in candidate and "parts" in candidate["content"]:
+                    parts = candidate["content"]["parts"]
+                    if len(parts) > 0 and "text" in parts[0]:
+                        logger.info("Successfully received response from Gemini API")
+                        return parts[0]["text"]
+            
+            raise Exception("Unexpected response format from Gemini API")
+            
+        except requests.exceptions.RequestException as e:
+            if attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)
+                logger.warning(f"Request failed: {e}. Retrying in {delay} seconds...")
+                time.sleep(delay)
+                continue
+            else:
+                logger.error(f"Request to Gemini API failed after {max_retries} attempts: {e}")
+                raise Exception(f"Failed to connect to Gemini API: {e}")
+    
+    raise Exception("Failed to get response from Gemini API after all retries")
 
 # --- Endpoints ---
 @app.get("/health")
@@ -189,6 +224,35 @@ async def upload_pdf(file: UploadFile = File(...)):
         logger.error(f"PDF upload failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error processing PDF: {str(e)}")
 
+@app.post("/upload-pdfs-batch")
+async def upload_pdfs_batch(files: List[UploadFile] = File(...)):
+    """
+    Upload multiple PDFs at once (max 1).
+    Returns combined text from all PDFs.
+    """
+    if len(files) > 1:
+        raise HTTPException(status_code=400, detail="Maximum 1 PDF allowed")
+    
+    results = []
+    for file in files:
+        if not file.filename.lower().endswith('.pdf'):
+            results.append({"filename": file.filename, "success": False, "error": "Not a PDF"})
+            continue
+        
+        try:
+            pdf_bytes = await file.read()
+            extracted_text = extract_text_from_pdf_bytes(pdf_bytes, file.filename)
+            results.append({
+                "filename": file.filename,
+                "text": extracted_text,
+                "text_length": len(extracted_text),
+                "success": True
+            })
+        except Exception as e:
+            results.append({"filename": file.filename, "success": False, "error": str(e)})
+    
+    return {"files": results, "total": len(results)}
+
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
     """
@@ -209,5 +273,15 @@ async def chat(req: ChatRequest):
         return ChatResponse(reply=reply, source="gemini-2.0-flash")
 
     except Exception as e:
+        error_message = str(e)
         logger.error(f"Chat endpoint failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error processing chat: {str(e)}")
+        
+        # Check if it's a rate limit error
+        if "rate limit" in error_message.lower() or "429" in error_message:
+            raise HTTPException(
+                status_code=429,
+                detail=error_message
+            )
+        
+        # Generic error
+        raise HTTPException(status_code=500, detail=f"Error processing chat: {error_message}")

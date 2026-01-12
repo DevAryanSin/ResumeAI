@@ -48,9 +48,9 @@ export default function Home() {
   async function handleFileUpload(files) {
     const fileArray = Array.from(files)
 
-    // Check total count (max 5 PDFs)
-    if (uploadedPDFs.length + fileArray.length > 5) {
-      alert('Maximum 5 PDFs allowed. Please remove some files first.')
+    // Check total count (max 1 PDF)
+    if (uploadedPDFs.length + fileArray.length > 1) {
+      alert('Maximum 1 PDF allowed. Please remove the file first.')
       return
     }
 
@@ -64,30 +64,29 @@ export default function Home() {
 
     setUploading(true)
 
-    for (const file of pdfFiles) {
-      try {
-        const formData = new FormData()
-        formData.append('file', file)
+    try {
+      // Upload single PDF
+      const formData = new FormData()
+      formData.append('file', pdfFiles[0])
 
-        const res = await fetch('http://localhost:8000/upload-pdf', {
-          method: 'POST',
-          body: formData,
-        })
+      const res = await fetch('http://localhost:8000/upload-pdf', {
+        method: 'POST',
+        body: formData,
+      })
 
-        const data = await res.json()
+      const data = await res.json()
 
-        if (res.ok) {
-          setUploadedPDFs(prev => [...prev, {
-            filename: data.filename,
-            text: data.extracted_text,
-            size: file.size
-          }])
-        } else {
-          alert(`Failed to upload ${file.name}: ${data.detail}`)
-        }
-      } catch (e) {
-        alert(`Error uploading ${file.name}: ${e.message}`)
+      if (res.ok) {
+        setUploadedPDFs([{
+          filename: data.filename,
+          text: data.extracted_text,
+          size: pdfFiles[0].size
+        }])
+      } else {
+        alert(`Upload failed: ${data.detail}`)
       }
+    } catch (e) {
+      alert(`Error uploading file: ${e.message}`)
     }
 
     setUploading(false)
@@ -151,17 +150,25 @@ export default function Home() {
         // Add AI response to conversation
         setConversation([...newConversation, { role: 'model', text: data.reply }])
       } else {
+        // Handle different error types
+        let errorMessage = data.detail || JSON.stringify(data)
+
+        // Check if it's a rate limit error
+        if (res.status === 429 || errorMessage.toLowerCase().includes('rate limit')) {
+          errorMessage = `⏱️ Rate Limit Exceeded\n\n${errorMessage}\n\n💡 Tips:\n• Wait a few moments before trying again\n• The system will automatically retry with delays\n• Check your API quota at https://aistudio.google.com/app/apikey\n• Consider upgrading your API plan if you need higher limits`
+        }
+
         // Add error message
         setConversation([...newConversation, {
           role: 'error',
-          text: 'Error: ' + (data.detail || JSON.stringify(data))
+          text: errorMessage
         }])
       }
     } catch (e) {
       // Add error message
       setConversation([...newConversation, {
         role: 'error',
-        text: 'Request failed: ' + e.message
+        text: '❌ Request Failed\n\n' + e.message + '\n\nPlease check:\n• Your internet connection\n• Backend server is running\n• API key is configured correctly'
       }])
     } finally {
       setLoading(false)
@@ -201,7 +208,7 @@ export default function Home() {
       <div style={styles.mainContainer}>
         {/* PDF Upload Section */}
         <div style={styles.sidePanel}>
-          <h3 style={styles.sidePanelTitle}>📄 Uploaded PDFs ({uploadedPDFs.length}/5)</h3>
+          <h3 style={styles.sidePanelTitle}>📄 Uploaded PDF ({uploadedPDFs.length}/1)</h3>
 
           <div
             style={{
@@ -220,18 +227,18 @@ export default function Home() {
               onChange={(e) => handleFileUpload(e.target.files)}
               style={styles.fileInput}
               id="file-upload"
-              disabled={uploading || uploadedPDFs.length >= 5}
+              disabled={uploading || uploadedPDFs.length >= 1}
             />
             <label htmlFor="file-upload" style={styles.dropZoneLabel}>
               {uploading ? (
                 <span>⏳ Uploading...</span>
-              ) : uploadedPDFs.length >= 5 ? (
+              ) : uploadedPDFs.length >= 1 ? (
                 <span>✓ Maximum reached</span>
               ) : (
                 <>
                   <span style={styles.uploadIcon}>📤</span>
                   <span>Click or drag PDFs here</span>
-                  <span style={styles.uploadHint}>Max 5 files</span>
+                  <span style={styles.uploadHint}>Max 1 file</span>
                 </>
               )}
             </label>
@@ -260,7 +267,7 @@ export default function Home() {
                 onClick={clearAllPDFs}
                 style={styles.clearPDFsButton}
               >
-                Clear All PDFs
+                Clear PDF
               </button>
             </>
           )}
