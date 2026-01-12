@@ -5,12 +5,11 @@ from fastapi.middleware.cors import CORSMiddleware
 import os
 import logging
 import requests
-import fitz  # PyMuPDF
-from typing import Optional, List
+from typing import Optional, List, Dict
 from dotenv import load_dotenv
-import io
 import time
 from datetime import datetime, timedelta
+import mimetypes
 
 # Load environment variables
 load_dotenv()
@@ -37,7 +36,7 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     message: str
     conversation_history: Optional[List[dict]] = None
-    pdf_context: Optional[str] = None  # Combined text from uploaded PDFs
+    pdf_file_uris: Optional[List[str]] = None  # List of Gemini file URIs
 
 class ChatResponse(BaseModel):
     reply: str
@@ -45,33 +44,66 @@ class ChatResponse(BaseModel):
 
 class PDFUploadResponse(BaseModel):
     filename: str
-    text_length: int
-    extracted_text: str
+    file_uri: str  # Gemini file URI
+    mime_type: str
+    size_bytes: int
     success: bool
 
 # --- Helper Functions ---
-def extract_text_from_pdf_bytes(pdf_bytes: bytes, filename: str) -> str:
+def upload_file_to_gemini(pdf_bytes: bytes, filename: str, mime_type: str = "application/pdf") -> Dict:
     """
-    Extracts text from PDF bytes using PyMuPDF.
+    Uploads a PDF file directly to Gemini File API.
+    Returns the file metadata including URI.
     """
+    if not GEMINI_API_KEY:
+        raise Exception("GEMINI_API_KEY is not configured")
+    
     try:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        text = ""
-        for page_num, page in enumerate(doc):
-            page_text = page.get_text()
-            text += f"\n--- Page {page_num + 1} ---\n{page_text}"
-        doc.close()
+        # Gemini File API upload endpoint
+        upload_url = f"https://generativelanguage.googleapis.com/upload/v1beta/files?key={GEMINI_API_KEY}"
         
-        logger.info(f"Extracted {len(text)} characters from {filename}")
-        return text.strip()
-    except Exception as e:
-        logger.error(f"Error extracting text from {filename}: {e}")
-        raise Exception(f"Failed to extract text from PDF: {str(e)}")
+        # Prepare multipart form data
+        files = {
+            'file': (filename, pdf_bytes, mime_type)
+        }
+        
+        # Metadata for the file
+        metadata = {
+            'file': {
+                'display_name': filename
+            }
+        }
+        
+        headers = {
+            'X-Goog-Upload-Protocol': 'multipart'
+        }
+        
+        logger.info(f"Uploading {filename} to Gemini File API...")
+        
+        response = requests.post(
+            upload_url,
+            files=files,
+            headers=headers,
+            timeout=120  # Longer timeout for file uploads
+        )
+        
+        if response.status_code != 200:
+            logger.error(f"File upload failed: {response.status_code} - {response.text}")
+            raise Exception(f"Failed to upload file to Gemini: {response.text}")
+        
+        file_data = response.json()
+        logger.info(f"Successfully uploaded {filename}. URI: {file_data.get('file', {}).get('uri', 'N/A')}")
+        
+        return file_data.get('file', {})
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error uploading file to Gemini: {e}")
+        raise Exception(f"Failed to upload file: {str(e)}")
 
-def call_gemini_api(message: str, conversation_history: Optional[List[dict]] = None, pdf_context: Optional[str] = None) -> str:
+def call_gemini_api(message: str, conversation_history: Optional[List[dict]] = None, pdf_file_uris: Optional[List[str]] = None) -> str:
     """
     Calls Gemini API directly using REST endpoint with retry logic and exponential backoff.
-    Includes PDF context if provided.
+    Includes PDF file URIs if provided (files uploaded to Gemini File API).
     """
     if not GEMINI_API_KEY:
         raise Exception("GEMINI_API_KEY is not configured")
@@ -91,23 +123,26 @@ def call_gemini_api(message: str, conversation_history: Optional[List[dict]] = N
                     "parts": [{"text": msg.get("text", "")}]
                 })
     
-    # Build the current message with PDF context if available
-    current_message = message
-    if pdf_context:
-        current_message = f"""I have uploaded some PDF documents. Here is their content:
-
-{pdf_context}
-
----
-
-Based on the above PDF content, please answer my question:
-
-{message}"""
+    # Build the current message parts
+    message_parts = []
     
-    # Add current message
+    # Add PDF file references if available
+    if pdf_file_uris:
+        for file_uri in pdf_file_uris:
+            message_parts.append({
+                "file_data": {
+                    "mime_type": "application/pdf",
+                    "file_uri": file_uri
+                }
+            })
+    
+    # Add the text message
+    message_parts.append({"text": message})
+    
+    # Add current message with all parts
     contents.append({
         "role": "user",
-        "parts": [{"text": current_message}]
+        "parts": message_parts
     })
     
     # Gemini API endpoint
@@ -197,8 +232,8 @@ async def health():
 @app.post("/upload-pdf", response_model=PDFUploadResponse)
 async def upload_pdf(file: UploadFile = File(...)):
     """
-    Upload a PDF file and extract its text content.
-    Returns the extracted text for use in chat queries.
+    Upload a PDF file directly to Gemini File API.
+    Returns the file URI for use in chat queries.
     """
     if not file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Only PDF files are allowed")
@@ -207,16 +242,17 @@ async def upload_pdf(file: UploadFile = File(...)):
         # Read PDF file
         pdf_bytes = await file.read()
         
-        # Extract text
-        extracted_text = extract_text_from_pdf_bytes(pdf_bytes, file.filename)
+        # Upload to Gemini File API
+        file_metadata = upload_file_to_gemini(pdf_bytes, file.filename)
         
-        if not extracted_text:
-            raise HTTPException(status_code=400, detail="No text could be extracted from the PDF")
+        if not file_metadata.get('uri'):
+            raise HTTPException(status_code=500, detail="Failed to get file URI from Gemini")
         
         return PDFUploadResponse(
             filename=file.filename,
-            text_length=len(extracted_text),
-            extracted_text=extracted_text,
+            file_uri=file_metadata.get('uri'),
+            mime_type=file_metadata.get('mimeType', 'application/pdf'),
+            size_bytes=len(pdf_bytes),
             success=True
         )
     
@@ -227,8 +263,8 @@ async def upload_pdf(file: UploadFile = File(...)):
 @app.post("/upload-pdfs-batch")
 async def upload_pdfs_batch(files: List[UploadFile] = File(...)):
     """
-    Upload multiple PDFs at once (max 1).
-    Returns combined text from all PDFs.
+    Upload multiple PDFs at once (max 1) directly to Gemini File API.
+    Returns file URIs for all PDFs.
     """
     if len(files) > 1:
         raise HTTPException(status_code=400, detail="Maximum 1 PDF allowed")
@@ -241,11 +277,12 @@ async def upload_pdfs_batch(files: List[UploadFile] = File(...)):
         
         try:
             pdf_bytes = await file.read()
-            extracted_text = extract_text_from_pdf_bytes(pdf_bytes, file.filename)
+            file_metadata = upload_file_to_gemini(pdf_bytes, file.filename)
             results.append({
                 "filename": file.filename,
-                "text": extracted_text,
-                "text_length": len(extracted_text),
+                "file_uri": file_metadata.get('uri'),
+                "mime_type": file_metadata.get('mimeType', 'application/pdf'),
+                "size_bytes": len(pdf_bytes),
                 "success": True
             })
         except Exception as e:
@@ -257,7 +294,7 @@ async def upload_pdfs_batch(files: List[UploadFile] = File(...)):
 async def chat(req: ChatRequest):
     """
     Chat endpoint that uses Gemini API.
-    Accepts a message, optional conversation history, and optional PDF context.
+    Accepts a message, optional conversation history, and optional PDF file URIs.
     """
     if not req.message:
         raise HTTPException(status_code=400, detail="message is required")
@@ -269,7 +306,7 @@ async def chat(req: ChatRequest):
         )
 
     try:
-        reply = call_gemini_api(req.message, req.conversation_history, req.pdf_context)
+        reply = call_gemini_api(req.message, req.conversation_history, req.pdf_file_uris)
         return ChatResponse(reply=reply, source="gemini-2.0-flash")
 
     except Exception as e:

@@ -1,12 +1,33 @@
 import { useState, useEffect } from 'react'
+import { API_ENDPOINTS } from '../config/api'
 
 export default function Home() {
   const [message, setMessage] = useState('')
   const [conversation, setConversation] = useState([])
   const [loading, setLoading] = useState(false)
-  const [uploadedPDFs, setUploadedPDFs] = useState([]) // Array of {filename, text, size}
+  const [uploadedPDFs, setUploadedPDFs] = useState([]) // Array of {filename, file_uri, size}
   const [uploading, setUploading] = useState(false)
   const [dragActive, setDragActive] = useState(false)
+  const [backendStatus, setBackendStatus] = useState({ connected: false, checking: true })
+
+  // Check backend health on mount
+  useEffect(() => {
+    async function checkBackend() {
+      try {
+        const res = await fetch(API_ENDPOINTS.HEALTH)
+        const data = await res.json()
+        setBackendStatus({
+          connected: res.ok && data.status === 'ok',
+          checking: false,
+          geminiConfigured: data.gemini_configured
+        })
+      } catch (e) {
+        console.error('Backend connection failed:', e)
+        setBackendStatus({ connected: false, checking: false })
+      }
+    }
+    checkBackend()
+  }, [])
 
   // Load conversation and PDFs from localStorage on mount
   useEffect(() => {
@@ -69,7 +90,7 @@ export default function Home() {
       const formData = new FormData()
       formData.append('file', pdfFiles[0])
 
-      const res = await fetch('http://localhost:8000/upload-pdf', {
+      const res = await fetch(API_ENDPOINTS.UPLOAD_PDF, {
         method: 'POST',
         body: formData,
       })
@@ -79,8 +100,8 @@ export default function Home() {
       if (res.ok) {
         setUploadedPDFs([{
           filename: data.filename,
-          text: data.extracted_text,
-          size: pdfFiles[0].size
+          file_uri: data.file_uri,
+          size: data.size_bytes
         }])
       } else {
         alert(`Upload failed: ${data.detail}`)
@@ -127,21 +148,19 @@ export default function Home() {
     const newConversation = [...conversation, { role: 'user', text: userMessage }]
     setConversation(newConversation)
 
-    // Combine all PDF texts
-    const pdfContext = uploadedPDFs.length > 0
-      ? uploadedPDFs.map((pdf, idx) =>
-        `\n=== PDF ${idx + 1}: ${pdf.filename} ===\n${pdf.text}`
-      ).join('\n\n')
+    // Get all PDF file URIs
+    const pdfFileUris = uploadedPDFs.length > 0
+      ? uploadedPDFs.map(pdf => pdf.file_uri).filter(uri => uri)
       : null
 
     try {
-      const res = await fetch('http://localhost:8000/chat', {
+      const res = await fetch(API_ENDPOINTS.CHAT, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: userMessage,
           conversation_history: conversation,
-          pdf_context: pdfContext
+          pdf_file_uris: pdfFileUris
         }),
       })
       const data = await res.json()
@@ -203,6 +222,24 @@ export default function Home() {
       <div style={styles.header}>
         <h1 style={styles.title}>ResumeAI</h1>
         <p style={styles.subtitle}>Upload Resumes</p>
+
+        {/* Backend Status Indicator */}
+        <div style={styles.statusContainer}>
+          {backendStatus.checking ? (
+            <span style={styles.statusChecking}>🔄 Checking backend...</span>
+          ) : backendStatus.connected ? (
+            <span style={styles.statusConnected}>
+              ✅ Backend Connected
+              {!backendStatus.geminiConfigured && (
+                <span style={styles.statusWarning}> ⚠️ Gemini API not configured</span>
+              )}
+            </span>
+          ) : (
+            <span style={styles.statusDisconnected}>
+              ❌ Backend Disconnected - Please start the backend server
+            </span>
+          )}
+        </div>
       </div>
 
       <div style={styles.mainContainer}>
@@ -378,6 +415,26 @@ const styles = {
     fontSize: '16px',
     opacity: 0.9,
     margin: 0,
+  },
+  statusContainer: {
+    marginTop: '15px',
+    fontSize: '14px',
+  },
+  statusChecking: {
+    color: '#fff',
+    opacity: 0.8,
+  },
+  statusConnected: {
+    color: '#4ade80',
+    fontWeight: '600',
+  },
+  statusDisconnected: {
+    color: '#fca5a5',
+    fontWeight: '600',
+  },
+  statusWarning: {
+    color: '#fbbf24',
+    fontWeight: '500',
   },
   mainContainer: {
     maxWidth: '1400px',
