@@ -194,8 +194,8 @@ export default function Home() {
   return (
     <div style={styles.container}>
       <div style={styles.header}>
-        <h1 style={styles.title}>RezumAI Chat</h1>
-        <p style={styles.subtitle}>Powered by Gemini 1.5 Flash • Upload PDFs to chat about them</p>
+        <h1 style={styles.title}>ResumeAI</h1>
+        <p style={styles.subtitle}>Upload Resumes</p>
       </div>
 
       <div style={styles.mainContainer}>

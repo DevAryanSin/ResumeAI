@@ -80,10 +80,14 @@ def call_gemini_api(message: str, conversation_history: Optional[List[dict]] = N
     # Add conversation history if provided
     if conversation_history:
         for msg in conversation_history:
-            contents.append({
-                "role": msg.get("role", "user"),
-                "parts": [{"text": msg.get("text", "")}]
-            })
+            role = msg.get("role", "user")
+            # Gemini only supports 'user' and 'model' roles.
+            # Filter out 'error' or any other custom roles used in frontend.
+            if role in ["user", "model"]:
+                contents.append({
+                    "role": role,
+                    "parts": [{"text": msg.get("text", "")}]
+                })
     
     # Build the current message with PDF context if available
     current_message = message
@@ -105,7 +109,7 @@ Based on the above PDF content, please answer my question:
     })
     
     # Gemini API endpoint
-    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
     
     request_payload = {
         "contents": contents,
@@ -202,7 +206,7 @@ async def chat(req: ChatRequest):
 
     try:
         reply = call_gemini_api(req.message, req.conversation_history, req.pdf_context)
-        return ChatResponse(reply=reply, source="gemini-1.5-flash")
+        return ChatResponse(reply=reply, source="gemini-2.0-flash")
 
     except Exception as e:
         logger.error(f"Chat endpoint failed: {e}", exc_info=True)

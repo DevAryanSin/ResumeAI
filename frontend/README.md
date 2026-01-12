@@ -5,6 +5,7 @@ Modern chat interface built with Next.js and React.
 ## Features
 
 - Beautiful gradient UI design
+- **PDF File Upload**: Drag and drop support for up to 5 PDFs
 - Conversation history with localStorage persistence
 - Real-time message updates
 - Keyboard shortcuts (Enter to send, Shift+Enter for new line)

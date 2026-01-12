@@ -3,5 +3,5 @@ uvicorn[standard]==0.22.0
 python-dotenv==1.0.0
 requests==2.31.0
 pydantic==1.10.18
-PyMuPDF==1.23.8
+PyMuPDF
 python-multipart==0.0.6
